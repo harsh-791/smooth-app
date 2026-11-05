@@ -3,6 +3,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:openfoodfacts/openfoodfacts.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
+import 'package:smooth_app/auth/keycloak_session.dart';
 import 'package:smooth_app/data_models/preferences/user_preferences.dart';
 import 'package:smooth_app/database/dao_secured_string.dart';
 import 'package:smooth_app/database/dao_string.dart';
@@ -338,6 +339,16 @@ abstract class ProductQuery {
     final User user,
     final LocalDatabase localDatabase,
   ) async {
+    // A Keycloak session is reused for Prices. Asking Prices for its own
+    // token would send the password and open another Device Activity session.
+    if (user.password.isEmpty) {
+      final String? accessToken = await KeycloakSession.instance
+          .freshAccessToken();
+      if (accessToken == null || accessToken.isEmpty) {
+        throw Exception('Could not get token');
+      }
+      return MaybeError<String>.value(accessToken);
+    }
     final UriProductHelper uriHelper = ProductQuery.uriPricesHelper;
     final String key =
         'priceBearerToken:${user.userId}|${user.password}|${uriHelper.domain}';

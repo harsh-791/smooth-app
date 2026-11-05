@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:openfoodfacts/openfoodfacts.dart';
 import 'package:provider/provider.dart';
+import 'package:smooth_app/auth/keycloak_config.dart';
+import 'package:smooth_app/data_models/preferences/user_preferences.dart';
 import 'package:smooth_app/data_models/user_management_provider.dart';
 import 'package:smooth_app/generic_lib/bottom_sheets/smooth_bottom_sheet.dart';
 import 'package:smooth_app/generic_lib/design_constants.dart';
 import 'package:smooth_app/helpers/analytics_helper.dart';
+import 'package:smooth_app/helpers/launch_url_helper.dart';
 import 'package:smooth_app/l10n/app_localizations.dart';
-import 'package:smooth_app/pages/preferences/account_deletion_webview.dart';
+import 'package:smooth_app/pages/preferences/user_preferences_dev_mode.dart';
 import 'package:smooth_app/pages/preferences_v2/cards/preference_card.dart';
 import 'package:smooth_app/pages/preferences_v2/roots/preferences_root.dart';
 import 'package:smooth_app/pages/preferences_v2/tiles/preference_tile.dart';
@@ -31,7 +34,7 @@ class AccountRoot extends PreferencesRoot {
         title: appLocalizations.preferences_manage_account_title,
         tiles: <PreferenceTile>[
           _buildViewProfileTile(appLocalizations, userId),
-          _buildChangePasswordTile(appLocalizations),
+          _buildChangePasswordTile(context, appLocalizations),
           _buildSignOutTile(context, appLocalizations),
         ],
       ),
@@ -51,14 +54,19 @@ class AccountRoot extends PreferencesRoot {
     );
   }
 
-  UrlPreferenceTile _buildChangePasswordTile(
+  PreferenceTile _buildChangePasswordTile(
+    BuildContext context,
     AppLocalizations appLocalizations,
   ) {
-    return UrlPreferenceTile(
+    return PreferenceTile(
       leading: const icons.Password.lock(),
       title: appLocalizations.preferences_change_password_title,
       subtitleText: appLocalizations.preferences_on_off_website_subtitle,
-      url: 'https://world.openfoodfacts.org/cgi/reset_password.pl',
+      onTap: () => LaunchUrlHelper.launchURLInBrowserView(
+        KeycloakConfig.accountUri(
+          production: _production(context),
+        ).toString(),
+      ),
     );
   }
 
@@ -108,13 +116,19 @@ class AccountRoot extends PreferencesRoot {
       leading: const icons.Warning(),
       title: appLocalizations.account_delete_title,
       subtitleText: appLocalizations.preferences_account_deletion_subtitle,
-      onTap: () async => Navigator.of(context).push<void>(
-        MaterialPageRoute<void>(
-          builder: (BuildContext context) => AccountDeletionWebview(),
-        ),
+      onTap: () => LaunchUrlHelper.launchURLInBrowserView(
+        KeycloakConfig.deleteAccountUri(
+          production: _production(context),
+        ).toString(),
       ),
     );
   }
+
+  bool _production(BuildContext context) =>
+      context.read<UserPreferences>().getFlag(
+        UserPreferencesDevMode.userPreferencesFlagProd,
+      ) ??
+      true;
 
   Future<bool?> _confirmLogout(
     BuildContext context,

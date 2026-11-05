@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:openfoodfacts/openfoodfacts.dart';
+import 'package:smooth_app/auth/keycloak_session.dart';
 import 'package:smooth_app/background/background_task.dart';
 import 'package:smooth_app/background/background_task_queue.dart';
 import 'package:smooth_app/background/operation_type.dart';
@@ -198,6 +199,14 @@ class BackgroundTaskFolksonomy extends BackgroundTask {
     final User? user = OpenFoodAPIConfiguration.globalUser;
     if (user == null) {
       throw Exception('No user found');
+    }
+    if (user.password.isEmpty) {
+      final String? accessToken = await KeycloakSession.instance
+          .freshAccessToken();
+      if (accessToken == null || accessToken.isEmpty) {
+        throw Exception('Could not get token');
+      }
+      return accessToken;
     }
 
     final MaybeError<String> token =

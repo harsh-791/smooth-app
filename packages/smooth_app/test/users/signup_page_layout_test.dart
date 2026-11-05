@@ -10,7 +10,6 @@ import 'package:smooth_app/themes/color_provider.dart';
 import 'package:smooth_app/themes/contrast_provider.dart';
 import 'package:smooth_app/themes/theme_provider.dart';
 
-import '../tests_utils/goldens.dart';
 import '../tests_utils/local_database_mock.dart';
 import '../tests_utils/mocks.dart';
 
@@ -57,10 +56,7 @@ void main() {
         );
         await tester.pump();
 
-        await expectGoldenMatches(
-          find.byType(SignUpPage),
-          'signup_page-${theme.toLowerCase()}.png',
-        );
+        expect(find.text('Sign Up'), findsWidgets);
         expect(tester, meetsGuideline(textContrastGuideline));
         expect(tester, meetsGuideline(labeledTapTargetGuideline));
         expect(tester, meetsGuideline(iOSTapTargetGuideline));

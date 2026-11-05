@@ -1,125 +1,173 @@
-import 'dart:async';
-
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:openfoodfacts/openfoodfacts.dart';
+import 'package:smooth_app/auth/bearer_http_client.dart';
+import 'package:smooth_app/auth/keycloak_browser.dart';
+import 'package:smooth_app/auth/keycloak_session.dart';
+import 'package:smooth_app/auth/keycloak_tokens.dart';
+import 'package:smooth_app/auth/off_user.dart';
 import 'package:smooth_app/data_models/login_result.dart';
 import 'package:smooth_app/data_models/preferences/user_preferences.dart';
 import 'package:smooth_app/database/dao_secured_string.dart';
+import 'package:smooth_app/pages/preferences/user_preferences_dev_mode.dart';
 import 'package:smooth_app/query/product_query.dart';
 import 'package:smooth_app/services/smooth_services.dart';
 
 class UserManagementProvider with ChangeNotifier {
-  static const String _USER_ID = 'user_id';
-  static const String _PASSWORD = 'pasword';
-  static const String _COOKIE = 'user_cookie';
+  UserManagementProvider({KeycloakBrowser? browser, KeycloakSession? session})
+    : _browser = browser ?? KeycloakBrowser(),
+      _session = session ?? KeycloakSession.instance;
 
-  /// Checks credentials and conditionally saves them.
-  Future<LoginResult> login(
-    final User user,
-    final UserPreferences preferences,
-  ) async {
-    final LoginResult loginResult = await LoginResult.getLoginResult(
-      user,
-      preferences,
-    );
-    if (loginResult.type != LoginResultType.successful) {
-      return loginResult;
-    }
-    await putUser(loginResult.user!);
-    await credentialsInStorage();
-    return loginResult;
-  }
+  /// Legacy secure-storage keys. The password key is misspelled on purpose:
+  /// that is the key already in the wild.
+  static const String _legacyUserId = 'user_id';
+  static const String _legacyPassword = 'pasword';
+  static const String _legacyCookie = 'user_cookie';
 
-  /// Deletes saved credentials from storage
-  Future<bool> logout() async {
-    OpenFoodAPIConfiguration.globalUser = null;
-    DaoSecuredString.remove(key: _USER_ID);
-    DaoSecuredString.remove(key: _PASSWORD);
-    DaoSecuredString.remove(key: _COOKIE);
-    notifyListeners();
-    final bool contains = await credentialsInStorage();
-    return !contains;
-  }
+  final KeycloakBrowser _browser;
+  final KeycloakSession _session;
 
-  /// Mounts already stored credentials, called at app startup
+  /// Opens Keycloak. [register] uses the registration endpoint.
   ///
-  /// We can use optional parameters to mock in tests
-  static Future<void> mountCredentials({
-    String? userId,
-    String? password,
+  /// A cancelled browser is [LoginResultType.cancelled], not an error.
+  Future<LoginResult> signIn(
+    UserPreferences preferences, {
+    bool register = false,
   }) async {
-    String? effectiveUserId;
-    String? effectivePassword;
-    String? effectiveCookie;
-
+    final bool production = _production(preferences);
+    _session.production = production;
     try {
-      effectiveUserId = userId ?? await DaoSecuredString.get(_USER_ID);
-      effectivePassword = password ?? await DaoSecuredString.get(_PASSWORD);
-      effectiveCookie = await DaoSecuredString.get(_COOKIE);
+      final KeycloakTokenSet? tokens = await _browser.authenticate(
+        production: production,
+        register: register,
+        languageCode: _languageCode(),
+      );
+      if (tokens == null) {
+        return const LoginResult(LoginResultType.cancelled);
+      }
+      final String? userId = tokens.userId;
+      if (userId == null) {
+        return const LoginResult(
+          LoginResultType.exception,
+          text: 'Signed in, but the account has no username.',
+        );
+      }
+      await _session.save(tokens);
+      await _forgetLegacyPassword();
+      OpenFoodAPIConfiguration.globalUser = OffUser(userId: userId);
+      notifyListeners();
+      return LoginResult(
+        LoginResultType.successful,
+        user: OffUser(userId: userId),
+      );
+    } on KeycloakAuthException catch (error) {
+      return LoginResult(LoginResultType.exception, text: error.message);
+    } on Object catch (error) {
+      return LoginResult(LoginResultType.exception, text: error.toString());
+    }
+  }
+
+  /// Clears the local session and ends the Keycloak session.
+  ///
+  /// Local tokens are removed even when the browser step is dismissed, so the
+  /// app stops sending the access token. The Keycloak session is what Device
+  /// Activity drops when the end-session page completes.
+  Future<bool> logout() async {
+    final String? idToken = _session.current?.idToken;
+    final String? refreshToken = _session.current?.refreshToken;
+    final bool production = _session.production;
+    if (refreshToken != null && refreshToken.isNotEmpty) {
+      try {
+        await logoutKeycloakSession(
+          refreshToken: refreshToken,
+          production: production,
+        );
+      } on KeycloakAuthException catch (error) {
+        Logs.w('Keycloak end-session failed', ex: error);
+      } on Object catch (error) {
+        Logs.w('Keycloak end-session failed', ex: error);
+      }
+    }
+    try {
+      await _browser.endSession(production: production, idToken: idToken);
+    } on KeycloakAuthException catch (error) {
+      Logs.w('Keycloak end-session failed', ex: error);
+    } on PlatformException catch (error) {
+      Logs.w('Keycloak end-session failed', ex: error);
+    }
+    OpenFoodAPIConfiguration.globalUser = null;
+    await _session.clear();
+    await _forgetLegacyPassword();
+    notifyListeners();
+    return !await _sessionHasTokens();
+  }
+
+  /// Restores a previous Keycloak session. Passwords saved by older versions
+  /// are deleted: they cannot be exchanged for a token without another login.
+  static Future<void> mountCredentials() async {
+    BearerHttpOverrides.install();
+    final KeycloakSession session = KeycloakSession.instance;
+    try {
+      await session.restore();
     } on PlatformException {
-      /// Decrypting the values can go wrong if, for example, the app was
-      /// manually overwritten from an external apk.
-      DaoSecuredString.remove(key: _USER_ID);
-      DaoSecuredString.remove(key: _PASSWORD);
-      DaoSecuredString.remove(key: _COOKIE);
+      await session.clear();
       Logs.e('Credentials query failed, you have been logged out');
     }
-
-    if (effectiveUserId == null || effectivePassword == null) {
+    await _forgetLegacyPassword();
+    final String? userId = session.userId;
+    if (userId == null) {
+      OpenFoodAPIConfiguration.globalUser = null;
       return;
     }
-
-    final User user = User(
-      userId: effectiveUserId,
-      password: effectivePassword,
-      cookie: effectiveCookie,
-    );
-    OpenFoodAPIConfiguration.globalUser = user;
+    OpenFoodAPIConfiguration.globalUser = OffUser(userId: userId);
   }
 
-  /// Checks if any credentials exist in storage
-  Future<bool> credentialsInStorage() async {
-    final String? userId = await DaoSecuredString.get(_USER_ID);
-    final String? password = await DaoSecuredString.get(_PASSWORD);
-
-    return userId != null && password != null;
-  }
-
-  /// Saves user to storage
-  Future<void> putUser(User user) async {
-    OpenFoodAPIConfiguration.globalUser = user;
-    await DaoSecuredString.put(key: _USER_ID, value: user.userId);
-    await DaoSecuredString.put(key: _PASSWORD, value: user.password);
-    if (user.cookie != null) {
-      await DaoSecuredString.put(key: _COOKIE, value: user.cookie!);
-    } else {
-      DaoSecuredString.remove(key: _COOKIE);
-    }
-    notifyListeners();
-  }
-
-  /// Check if the user is still logged in and the credentials are still valid
-  /// If not, the user is logged out
+  /// Refreshes the access token. An rejected refresh token signs the user out.
   Future<void> checkUserLoginValidity(UserPreferences preferences) async {
     if (!ProductQuery.isLoggedIn()) {
       return;
     }
-    final User user = ProductQuery.getWriteUser();
-    final LoginResult loginResult = await LoginResult.getLoginResult(
-      User(userId: user.userId, password: user.password),
-      preferences,
-    );
-
-    if (loginResult.type == LoginResultType.unsuccessful) {
-      // TODO(m123): Notify the user
-      await logout();
-      return;
+    _session.production = _production(preferences);
+    try {
+      await _session.ensureFresh();
+    } on KeycloakAuthException catch (error) {
+      // The refresh token was revoked. Don't open the end-session browser
+      // during startup; there is no Keycloak session left to close.
+      if (error.invalidGrant) {
+        OpenFoodAPIConfiguration.globalUser = null;
+        await _session.clear();
+        await _forgetLegacyPassword();
+        notifyListeners();
+      }
+    } on Object catch (error) {
+      // Offline, or Keycloak is down. Keep the stored session.
+      Logs.w('Could not refresh the access token', ex: error);
     }
-
-    /// Save the cookie if necessary
-    if (user.cookie == null && loginResult.user?.cookie != null) {
-      putUser(loginResult.user!);
+    if (_session.current == null) {
+      OpenFoodAPIConfiguration.globalUser = null;
     }
+  }
+
+  /// Whether a Keycloak session is stored on this device.
+  Future<bool> credentialsInStorage() async => _session.current != null;
+
+  Future<bool> _sessionHasTokens() => credentialsInStorage();
+
+  static bool _production(UserPreferences preferences) =>
+      preferences.getFlag(UserPreferencesDevMode.userPreferencesFlagProd) ??
+      true;
+
+  static String? _languageCode() {
+    final String tag = ProductQuery.getLanguage().offTag;
+    if (tag.length == 2) {
+      return tag;
+    }
+    return null;
+  }
+
+  static Future<void> _forgetLegacyPassword() async {
+    await DaoSecuredString.remove(key: _legacyUserId);
+    await DaoSecuredString.remove(key: _legacyPassword);
+    await DaoSecuredString.remove(key: _legacyCookie);
   }
 }

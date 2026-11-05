@@ -39,6 +39,9 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         multiDexEnabled = true
+        // AppAuth redirect scheme. Must stay lower case.
+        manifestPlaceholders["appAuthRedirectScheme"] =
+            "org.openfoodfacts.scanner"
     }
 
     signingConfigs {

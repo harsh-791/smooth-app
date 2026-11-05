@@ -66,6 +66,7 @@ dependencies:
   webview_flutter_android: 4.13.0
   webview_flutter_wkwebview: 3.26.0
   flutter_custom_tabs: 2.6.0
+  flutter_appauth: 13.0.0
   flutter_image_compress: 2.5.1
   connectivity_plus: 7.3.1
   dart_ping: 10.0.1
